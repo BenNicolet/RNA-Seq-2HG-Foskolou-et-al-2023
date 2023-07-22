@@ -1,0 +1,1368 @@
+---
+title: "RNA-seq analysis of S- or R-2HG at day 5 or 12"
+author: "Benoit Nicolet"
+date: "07/4/2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(circlize)
+library(pheatmap)
+library(RColorBrewer)
+library(corrplot)
+library(DESeq2)
+library(tximport)
+library(colorRamps)
+#library(devtools)
+#library(ggfortify)
+#library(reshape)
+library(biomaRt)
+library(ggrepel)
+
+# BiocManager::install("tximport")
+
+
+# library(httr)
+# config(sslverifypeer = 0L)
+
+
+knitr::opts_knit$set("/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/")
+
+```
+
+# Importing BiomaRt annotations
+```{r BiomaRt time}
+
+#listEnsemblArchives()
+#listMarts()
+## Here you say where and what organism you want
+## It will be from the ensembl database and H.sapiens genes
+
+ensembl <- useEnsembl(biomart="ensembl",dataset="hsapiens_gene_ensembl", version=103)
+
+#listDatasets(ensembl)
+
+## Salmon quants were aligned with GenCode v37. Should be equivalent to ensembl r103
+
+## Here I wanted to get the geneID + transcriptID + Gene name + type of gene, all this for coding genes only:
+tx2gene <- getBM(attributes=c("ensembl_transcript_id_version","ensembl_gene_id"), mart = ensembl)
+
+tx_annotations <- getBM(attributes=c("ensembl_gene_id","external_gene_name","gene_biotype"), mart = ensembl)
+tx_annotations <- tx_annotations[!duplicated(tx_annotations$ensembl_gene_id),]
+
+```
+
+
+# Importing read counts (Salmon)
+```{r importing counts}
+
+dir_quants <- "/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Salmon_output/"
+file_name <- list.files(dir_quants)
+files <- paste0(dir_quants,file_name,"/quant.sf")
+#files
+#names(files) <- mapply(strsplit(as.character(file_name),"_"),FUN=function(x){(as.character(x)[1])})
+names(files) <- file_name
+
+tximp.salmon.2HG <- tximport(files = files,type = "salmon",tx2gene = tx2gene)
+
+dim(tximp.salmon.2HG$counts) # 60232 21
+
+#tximp.salmon.2HG$abundance
+TPM_2HG <- tximp.salmon.2HG$abundance
+TPM_2HG <- data.frame(TPM_2HG)
+
+TPM_2HG$ID <- rownames(TPM_2HG)
+
+TPM_2HG_ordered <- data.frame(
+  "ID"=TPM_2HG$ID,
+  
+  "Naive_d12_A"=TPM_2HG$d12_A_naiveCD8,
+  "Naive_d12_B"=TPM_2HG$d12_B_naiveCD8,
+  "Naive_d12_C"=TPM_2HG$d12_C_naiveCD8,
+  
+  "Vehicle_d12_A"=TPM_2HG$d12_A_vehicle,
+  "Vehicle_d12_B"=TPM_2HG$d12_B_vehicle,
+  "Vehicle_d12_C"=TPM_2HG$d12_C_vehicle,
+  
+  "S2HG_d12_A"=TPM_2HG$d12_A_S2HG,
+  "S2HG_d12_B"=TPM_2HG$d12_B_S2HG,
+  "S2HG_d12_C"=TPM_2HG$d12_C_S2HG,
+  
+  "R2HG_d12_A"=TPM_2HG$d12_A_R2HG,
+  "R2HG_d12_B"=TPM_2HG$d12_B_R2HG,
+  "R2HG_d12_C"=TPM_2HG$d12_C_R2HG
+
+)
+
+
+```
+
+# Preping for DESeq2 analysis
+```{r preping for DESeq2}
+
+
+# "d12_A_naiveCD8" "d12_A_R2HG"     "d12_A_S2HG"     "d12_A_vehicle"  
+# "d12_B_naiveCD8" "d12_B_R2HG"     "d12_B_S2HG"     "d12_B_vehicle" 
+# "d12_C_naiveCD8" "d12_C_R2HG"     "d12_C_S2HG"     "d12_C_vehicle" 
+# 
+# "d5_60_H20"      "d5_60_R2HG"     "d5_60_S2HG"
+# "d5_62_H20"      "d5_62_R2HG"     "d5_62_S2HG"    
+# "d5_63_H20"      "d5_63_R2HG"     "d5_63_S2HG"    
+
+{
+sample_table2HG <- NULL
+sample_table2HG$sample <- colnames(tximp.salmon.2HG$counts)
+sample_table2HG$condition <- c("Naive_d12","R_2HG_d12","S_2HG_d12","Vehicle_d12",
+                               "Naive_d12","R_2HG_d12","S_2HG_d12","Vehicle_d12",
+                               "Naive_d12","R_2HG_d12","S_2HG_d12","Vehicle_d12",
+                               "H2O_d5","R_2HG_d5","S_2HG_d5",
+                               "H2O_d5","R_2HG_d5","S_2HG_d5",
+                               "H2O_d5","R_2HG_d5","S_2HG_d5")
+
+sample_table2HG$replicate <- c("A","A","A","A",
+                               "B","B","B","B",
+                               "C","C","C","C",
+                               "A","A","A",
+                               "B","B","B",
+                               "C","C","C")
+
+sample_table2HG <- as.data.frame(sample_table2HG)
+head(sample_table2HG)
+rownames(sample_table2HG) <- sample_table2HG$sample
+sample_table2HG$sample <- NULL
+head(sample_table2HG)
+}
+
+#rownames must match colnames of the other:
+all(rownames(sample_table2HG) %in% colnames(tximp.salmon.2HG$counts))
+all(rownames(sample_table2HG) == colnames(tximp.salmon.2HG$counts))
+
+dim(tximp.salmon.2HG$counts)
+
+TPM_2HG <- data.frame(tximp.salmon.2HG$abundance)
+TPM_2HG$ID <- rownames(TPM_2HG)
+TPM_2HG <- merge(TPM_2HG,tx_annotations, by.x="ID", by.y="ensembl_gene_id", all.x=T)
+
+write.table(TPM_2HG,"R_S2HG_d12+d5_TPM_with_annotation.csv",row.names = F,dec=",",sep=";")
+
+
+
+```
+
+
+## DESeq2 Analysis
+```{r DESeq2 Analysis}
+dds2HG_mRNA<- DESeqDataSetFromTximport(tximp.salmon.2HG, sample_table2HG, design = ~  condition) #replicate +
+
+dds2HG_mRNA <- DESeq(dds2HG_mRNA,parallel = T)
+#dds2HG_mRNA <- results(dds2HG_mRNA, alpha = 0.01, parallel = TRUE)
+
+Norm_counts_2HG <- counts(dds2HG_mRNA,normalized=TRUE)
+
+
+```
+
+## General results MA plot + PCA
+```{r General results}
+vst_2HG <- vst(dds2HG_mRNA, blind=F)
+
+#MA plot raw 
+plotMA(dds2HG_mRNA,ylim=c(-15,15),alpha=0.01)
+
+#PCA top 5000
+plotPCA(vst_2HG,ntop=5000)+
+  theme_minimal()+
+  theme(aspect.ratio = 1)
+
+#PCA top 500
+plotPCA(vst_2HG,ntop=500)+
+  theme_minimal()+
+  theme(aspect.ratio = 1)
+
+#PCA top 100
+plotPCA(vst_2HG,ntop=100)+
+  theme_minimal()+
+  theme(aspect.ratio = 1)
+
+#summary(res2HG_mRNA)
+
+```
+
+# Detailed results
+## Day 12 results
+
+## R2HG_vs_S2HG_d12
+```{r R2HG_vs_S2HG_d12}
+resultsNames(dds2HG_mRNA)
+
+#contrast(AB)= "condition" "B" , "A"
+R2HG_vs_S2HG_d12 <- lfcShrink(dds2HG_mRNA, type="normal",contrast =  c("condition","S_2HG_d12","R_2HG_d12"), parallel = T)
+R2HG_vs_S2HG_d12 <- data.frame(R2HG_vs_S2HG_d12)
+R2HG_vs_S2HG_d12$group <- ""
+R2HG_vs_S2HG_d12$group[abs(R2HG_vs_S2HG_d12$log2FoldChange)>0.5 & R2HG_vs_S2HG_d12$padj<0.05] <- "significant"
+
+R2HG_vs_S2HG_d12$ID <- rownames(R2HG_vs_S2HG_d12)
+R2HG_vs_S2HG_d12 <- merge(R2HG_vs_S2HG_d12, tx_annotations, by.x="ID", by.y="ensembl_gene_id", all.x=T)
+
+
+ggplot(R2HG_vs_S2HG_d12, aes(x=-log2FoldChange, y=-log10(padj)))+
+  geom_point(data=R2HG_vs_S2HG_d12[!R2HG_vs_S2HG_d12$group=="significant",],colour="grey", size=1,stroke=0)+
+  geom_point(data=R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$group=="significant" &R2HG_vs_S2HG_d12$log2FoldChange>0.5,],color="#7f0002",size=2,stroke=0)+
+  geom_point(data=R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$group=="significant" &R2HG_vs_S2HG_d12$log2FoldChange< -0.5,],color="#073f80",size=2,stroke=0)+  
+  geom_hline(yintercept = -log10(0.05), linetype="dashed")+ # -log(0.001)
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  # scale_x_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_y_continuous(limits = c(0,20), expand = c(0,0))+
+  ggtitle("R2HG_vs_S2HG_d12")+
+  ggrepel::geom_text_repel(data=R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$log2FoldChange> 0.5 & R2HG_vs_S2HG_d12$padj<0.0001 ,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 1, nudge_x = -1, size=3)+
+  ggrepel::geom_text_repel(data=R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$log2FoldChange< -0.5 & R2HG_vs_S2HG_d12$padj<0.0001 ,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 1, nudge_x = 1, size=3)+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+
+
+dim(R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$group=="significant",]) # 45 DE genes 
+
+#write.table(R2HG_vs_S2HG_d12, "/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/R2HG_vs_S2HG_d12_lfcshrink.csv", sep=";",dec = ",",row.names = F)
+
+```
+
+
+## Vehicle_d12_vs_S_2HG_d12
+```{r Vehicle_d12_vs_S_2HG_d12}
+resultsNames(dds2HG_mRNA)
+
+#contrast(AB)= "condition" "B" , "A"
+Vehicle_d12_vs_S_2HG_d12 <- lfcShrink(dds2HG_mRNA, type="normal",contrast =  c("condition","S_2HG_d12","Vehicle_d12"), parallel = T)
+Vehicle_d12_vs_S_2HG_d12 <- data.frame(Vehicle_d12_vs_S_2HG_d12)
+Vehicle_d12_vs_S_2HG_d12$group <- ""
+Vehicle_d12_vs_S_2HG_d12$group[abs(Vehicle_d12_vs_S_2HG_d12$log2FoldChange)>0.5 & Vehicle_d12_vs_S_2HG_d12$padj<0.05] <- "significant"
+
+#Vehicle_d12_vs_S_2HG_d12 <- subset(Vehicle_d12_vs_S_2HG_d12,Vehicle_d12_vs_S_2HG_d12$baseMean>10)
+
+Vehicle_d12_vs_S_2HG_d12$ID <- rownames(Vehicle_d12_vs_S_2HG_d12)
+Vehicle_d12_vs_S_2HG_d12 <- merge(Vehicle_d12_vs_S_2HG_d12, tx_annotations, by.x="ID", by.y="ensembl_gene_id", all.x=T)
+
+
+ggplot(Vehicle_d12_vs_S_2HG_d12, aes(x=log2FoldChange, y=-log10(padj)))+
+  geom_point(data=Vehicle_d12_vs_S_2HG_d12[!Vehicle_d12_vs_S_2HG_d12$group=="significant",],colour="grey", size=1,stroke=0)+
+  geom_point(data=Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group=="significant" & Vehicle_d12_vs_S_2HG_d12$log2FoldChange< -0.5,],color="#797d7f",size=2,stroke=0)+
+  geom_point(data=Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group=="significant" & Vehicle_d12_vs_S_2HG_d12$log2FoldChange>0.5 ,],color="#7f0002",size=2,stroke=0)+
+  geom_hline(yintercept = -log10(0.05), linetype="dashed")+ # -log(0.001)
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  # scale_x_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_y_continuous(limits = c(0,13.5), expand = c(0,0),breaks = c(0,6,12))+
+  ggtitle("Vehicle_d12_vs_S_2HG_d12")+
+  ggrepel::geom_text_repel(data=Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$padj<0.02 & Vehicle_d12_vs_S_2HG_d12$log2FoldChange< -0.5,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 2, nudge_x = -1)+
+    ggrepel::geom_text_repel(data=Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group=="significant" & Vehicle_d12_vs_S_2HG_d12$log2FoldChange>0.5,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 2, nudge_x = 2)+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+#DESeq2::plotCounts(dds2HG_mRNA,gene = "ENSG00000241506")
+
+
+
+dim(Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group=="significant",]) # 45 DE genes 
+
+# write.table(Vehicle_d12_vs_S_2HG_d12, "/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Vehicle_d12_vs_S_2HG_d12_lfcshrink.csv", sep=";",dec = ",",row.names = F)
+
+
+```
+
+
+## Vehicle_d12_vs_R_2HG_d12
+```{r Vehicle_d12_vs_R_2HG_d12}
+
+#contrast(AB)= "condition" "B" , "A"
+Vehicle_d12_vs_R_2HG_d12 <- lfcShrink(dds2HG_mRNA, type="normal",contrast =  c("condition","R_2HG_d12","Vehicle_d12"), parallel = T)
+Vehicle_d12_vs_R_2HG_d12 <- data.frame(Vehicle_d12_vs_R_2HG_d12)
+Vehicle_d12_vs_R_2HG_d12$group <- ""
+Vehicle_d12_vs_R_2HG_d12$group[abs(Vehicle_d12_vs_R_2HG_d12$log2FoldChange)>0.5 & Vehicle_d12_vs_R_2HG_d12$padj<0.05] <- "significant"
+
+Vehicle_d12_vs_R_2HG_d12$ID <- rownames(Vehicle_d12_vs_R_2HG_d12)
+Vehicle_d12_vs_R_2HG_d12 <- merge(Vehicle_d12_vs_R_2HG_d12, tx_annotations, by.x="ID", by.y="ensembl_gene_id", all.x=T)
+
+
+ggplot(Vehicle_d12_vs_R_2HG_d12, aes(x=log2FoldChange, y=-log10(padj)))+
+  geom_point(data=Vehicle_d12_vs_R_2HG_d12[!Vehicle_d12_vs_R_2HG_d12$group=="significant",],colour="grey", size=1,stroke=0)+
+  geom_point(data=Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$group=="significant" & Vehicle_d12_vs_R_2HG_d12$log2FoldChange< -0.5,],color="#797d7f",size=2,stroke=0)+
+  geom_point(data=Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$group=="significant" & Vehicle_d12_vs_R_2HG_d12$log2FoldChange>0.5,],color="#073f80",size=2,stroke=0)+
+  geom_hline(yintercept = -log10(0.05), linetype="dashed")+ # -log(0.001)
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  # scale_x_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_y_continuous(limits = c(0,25), expand = c(0,0))+
+  ggtitle("Vehicle_d12_vs_R_2HG_d12")+
+  ggrepel::geom_text_repel(data=Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$log2FoldChange<= -1 & Vehicle_d12_vs_R_2HG_d12$padj<0.0001,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 0.5,nudge_x = -1)+
+  ggrepel::geom_text_repel(data=Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$log2FoldChange>1 & Vehicle_d12_vs_R_2HG_d12$padj<0.001,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 0.5,nudge_x = 1)+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+
+dim(Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$group=="significant",]) # 45 DE genes 
+
+#write.table(Vehicle_d12_vs_R_2HG_d12, "/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Vehicle_d12_vs_R_2HG_d12_lfcshrink.csv", sep=";",dec = ",",row.names = F)
+
+```
+
+
+## comparing R- ans S-2HG effects at day 12
+```{r comparing R- ans S-2HG effects at day 12}
+Vehicle_d12_vs_R_2HG_d12_LFC <- Vehicle_d12_vs_R_2HG_d12
+Vehicle_d12_vs_S_2HG_d12_LFC <- Vehicle_d12_vs_S_2HG_d12
+colnames(Vehicle_d12_vs_R_2HG_d12_LFC)[2:10] <- paste0(colnames(Vehicle_d12_vs_R_2HG_d12_LFC)[2:10],"_R2HG")
+colnames(Vehicle_d12_vs_S_2HG_d12_LFC)[2:10] <- paste0(colnames(Vehicle_d12_vs_S_2HG_d12_LFC)[2:10],"_S2HG")
+
+LFC_LFC_d12_R_vs_S_2HG <- merge(Vehicle_d12_vs_R_2HG_d12_LFC,Vehicle_d12_vs_S_2HG_d12_LFC, by="ID")
+
+# 
+# ggplot(LFC_LFC_d12_R_vs_S_2HG[(LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant"),],aes(y=log2FoldChange_R2HG,x=log2FoldChange_S2HG))+
+#   geom_point(data=LFC_LFC_d12_R_vs_S_2HG[!(LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant"),], color="grey", stroke=0)+
+#   geom_point(color="#839192")+
+#   geom_point(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG>0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant"),], color="red")+
+#   geom_point(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG<0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant"),], color="blue")+
+#   geom_point(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG<0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG> -0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant"),], color="#008000")+
+#   geom_point(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< -0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant"| LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant"),], color="purple")+
+#   geom_hline(yintercept = c(-0.5,0.5), linetype="dashed")+
+#   geom_vline(xintercept = 0)+
+#   geom_hline(yintercept = 0)+
+#   geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+#   scale_y_continuous(limits = c(-6,6), expand = c(0,0))+
+#   scale_x_continuous(limits = c(-5,5), expand = c(0,0))+
+#   theme_classic()+
+#   theme(aspect.ratio = 1)+
+#   ggtitle("LFC_LFC plot")+
+#   ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>1 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG>1 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = 2, nudge_y = 1,size=3)+
+#   ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>1.7 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG<0.5 & LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2, nudge_y = 1,size=3)+
+#   ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< 0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG> 0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding"| LFC_LFC_d12_R_vs_S_2HG$external_gene_name_R2HG=="SELL",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = 2, nudge_y = -1,size=3)+
+#   ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< -3 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -3 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant"| LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding" | LFC_LFC_d12_R_vs_S_2HG$external_gene_name_R2HG=="ZNF683",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2, nudge_y = -1,size=3)+
+#   ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[abs(LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG)<0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -1.5 & !LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" & LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant" & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2,size=3)
+
+
+
+## making groups ##
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[!(LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant")]= "NS"
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG>0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant")]= "UP_both"
+
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant")]= "UP_R2HG_DOWN_S2HG"
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[abs(LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG)<0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant")]= "NS_R2HG_DOWN_S2HG"
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>0.5 & abs(LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG)<0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant")]= "UP_R2HG_NS_S2HG"
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< -0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG>0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant")]= "UP_S2HG_DOWN_R2HG"
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[abs(LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG)<0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG>0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant")]= "UP_S2HG_NS_R2HG"
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< -0.5 & abs(LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG)<0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant")]= "NS_S2HG_DOWN_R2HG"
+
+LFC_LFC_d12_R_vs_S_2HG$LFC_group[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< -0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant"| LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant")]= "DOWN_both"
+
+table(LFC_LFC_d12_R_vs_S_2HG$LFC_group)
+
+
+## plotting groups ##
+
+
+ggplot(LFC_LFC_d12_R_vs_S_2HG,aes(y=log2FoldChange_R2HG,x=log2FoldChange_S2HG,color=LFC_group))+
+  geom_point(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$LFC_group=="NS",],stroke=0,color="grey", alpha=0.5)+
+  geom_point(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant",],stroke=0, size=2)+
+    geom_hline(yintercept = c(-0.5,0.5), linetype="dashed")+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  scale_y_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_x_continuous(limits = c(-5,5), expand = c(0,0))+
+  theme_classic()+#7f0002
+  #scale_color_manual(values= c()) +
+  scale_colour_manual(values = c("#bb8fce", "#ec7063", "#7fb3d5","#7d3c98", "#073f80", "#2e86c1","#7f0002", "#f0b27a"))+
+  theme(aspect.ratio = 1)+
+  ggtitle("LFC_LFC plot")+
+    ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>1 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG>1 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = 2, nudge_y = 1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG>1.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG<0.5 & LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -0.5, nudge_y = 1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< 0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG> 0.5 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding"| LFC_LFC_d12_R_vs_S_2HG$external_gene_name_R2HG=="SELL",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = 2, nudge_y = -1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG< -3 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -3 & (LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant"| LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding" | LFC_LFC_d12_R_vs_S_2HG$external_gene_name_R2HG=="ZNF683",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2, nudge_y = -1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d12_R_vs_S_2HG[abs(LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_R2HG)<0.5 & LFC_LFC_d12_R_vs_S_2HG$log2FoldChange_S2HG< -1.5 & !LFC_LFC_d12_R_vs_S_2HG$group_R2HG=="significant" & LFC_LFC_d12_R_vs_S_2HG$group_S2HG=="significant" & LFC_LFC_d12_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2,size=3,show.legend = T)
+
+write.table(LFC_LFC_d12_R_vs_S_2HG,"Data_from_LFC_LFC_plot_d12_R-S2HG_stats.csv", sep=";", dec=",", row.names = F)
+
+
+```
+
+
+## Heatmaps of hits
+```{r heatmap of d12 hits in TPM DEG LFC>0.5}
+
+dim(R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$group =="significant" ,]) # 361 
+dim(Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group =="significant" ,]) # 45
+dim(Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$group =="significant" ,]) # 482
+
+
+hits_d12 <- rbind.data.frame(R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$group =="significant" ,], Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group =="significant" ,],
+                             Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$group =="significant" ,])
+
+hits_d12 <- distinct(hits_d12, ID,.keep_all=T)
+
+TPMs_d12 <- data.frame(tximp.salmon.2HG$abundance) ## Getting TPMs
+TPMs_d12 <- dplyr::select(TPMs_d12,contains("d12"))
+TPMs_d12 <- log10(TPMs_d12)
+TPMs_d12$ID <- rownames(TPMs_d12)
+TPMs_d12 <- do.call(data.frame,lapply(TPMs_d12,function(x) replace(x, is.infinite(x),NA)))
+TPMs_d12[is.na(TPMs_d12)]<- -3 
+TPMs_hits_d12 <- TPMs_d12[TPMs_d12$ID %in% hits_d12$ID,]
+dim(TPMs_hits_d12)
+
+col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_hits_d12[,1:12], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_hits_d12[,1:12]), cellwidth = 15,
+           fontsize_row = 0.001)
+
+
+## dropping naives ##
+
+
+TPMs_d12_no_naive <- data.frame(tximp.salmon.2HG$abundance)# Getting TPMs
+TPMs_d12_no_naive <- dplyr::select(TPMs_d12_no_naive,contains("d12"))
+TPMs_d12_no_naive <- dplyr::select(TPMs_d12_no_naive,-contains("naive"))
+TPMs_d12_no_naive <- log10(TPMs_d12_no_naive)
+TPMs_d12_no_naive$ID <- rownames(TPMs_d12_no_naive)
+TPMs_d12_no_naive <- do.call(data.frame,lapply(TPMs_d12_no_naive,function(x) replace(x, is.infinite(x),NA)))
+TPMs_d12_no_naive[is.na(TPMs_d12_no_naive)]<- -3 
+TPMs_hits_d12_no_naive <- TPMs_d12_no_naive[TPMs_d12_no_naive$ID %in% hits_d12$ID,]
+dim(TPMs_hits_d12_no_naive)
+
+#col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_hits_d12_no_naive[,1:9], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_hits_d12_no_naive[,1:9]), cellwidth = 15,
+           fontsize_row = 0.001)
+
+
+
+TPMs_d12_no_naive <- data.frame(tximp.salmon.2HG$abundance)# Getting TPMs
+TPMs_d12_no_naive <- dplyr::select(TPMs_d12_no_naive,contains("d12"))
+TPMs_d12_no_naive <- dplyr::select(TPMs_d12_no_naive,-contains("naive"))
+TPMs_d12_no_naive <- log10(TPMs_d12_no_naive)
+TPMs_d12_no_naive$ID <- rownames(TPMs_d12_no_naive)
+TPMs_d12_no_naive <- do.call(data.frame,lapply(TPMs_d12_no_naive,function(x) replace(x, is.infinite(x),NA)))
+TPMs_d12_no_naive[is.na(TPMs_d12_no_naive)]<- -3 
+TPMs_hits_d12_no_naive <- TPMs_d12_no_naive[TPMs_d12_no_naive$ID %in% hits_d12$ID,]
+dim(TPMs_hits_d12_no_naive)
+
+#col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_hits_d12_no_naive[,1:9], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_hits_d12_no_naive[,1:9]), cellwidth = 15,
+           fontsize_row = 0.001)
+
+
+
+
+### isolating not BOTH_UP not BOTH_DOWN ##
+
+LFC_LFC_d12_R_vs_S_2HG_hits_not_both_up_down <- LFC_LFC_d12_R_vs_S_2HG[!LFC_LFC_d12_R_vs_S_2HG$LFC_group=="UP_both" & !LFC_LFC_d12_R_vs_S_2HG$LFC_group=="DOWN_both" & !LFC_LFC_d12_R_vs_S_2HG$LFC_group=="NS",]
+
+table(LFC_LFC_d12_R_vs_S_2HG_hits_not_both_up_down$LFC_group)
+
+TPMs_d12_not_both_up_down <- TPMs_d12_no_naive
+TPMs_d12_not_both_up_down <- TPMs_d12_not_both_up_down[TPMs_d12_not_both_up_down$ID %in% LFC_LFC_d12_R_vs_S_2HG_hits_not_both_up_down$ID,]
+dim(TPMs_d12_not_both_up_down)
+
+#col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_d12_not_both_up_down[,1:9], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_d12_not_both_up_down[,1:9]), cellwidth = 15,
+           fontsize_row = 0.001)
+
+
+#write.table(TPMs_d12_not_both_up_down,"TPM_from_LFC_LFC_plot_d12_R-S2HG_stats.csv", sep=";", dec=",", row.names = F)
+
+```
+
+## Heatmap of hits with LFC>1
+```{r heatmap of TPM DEG LFC>1}
+
+dim(R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$group =="significant" & abs(R2HG_vs_S2HG_d12$log2FoldChange)>1,]) # 361 
+dim(Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group =="significant" & abs(Vehicle_d12_vs_S_2HG_d12$log2FoldChange)>1,]) # 45
+dim(Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$group =="significant" & abs(Vehicle_d12_vs_R_2HG_d12$log2FoldChange)>1,]) # 482
+
+
+hits_d12_LFC1 <- rbind.data.frame(R2HG_vs_S2HG_d12[R2HG_vs_S2HG_d12$group =="significant" & abs(R2HG_vs_S2HG_d12$log2FoldChange)>1,],
+                  Vehicle_d12_vs_S_2HG_d12[Vehicle_d12_vs_S_2HG_d12$group =="significant" & abs(Vehicle_d12_vs_S_2HG_d12$log2FoldChange)>1,],
+                  Vehicle_d12_vs_R_2HG_d12[Vehicle_d12_vs_R_2HG_d12$group =="significant" & abs(Vehicle_d12_vs_R_2HG_d12$log2FoldChange)>1,])
+
+hits_d12_LFC1 <- distinct(hits_d12_LFC1, ID,.keep_all=T)
+
+TPMs_d12 <- data.frame(tximp.salmon.2HG$abundance)
+TPMs_d12 <- dplyr::select(TPMs_d12,contains("d12"))
+TPMs_d12 <- log10(TPMs_d12)
+TPMs_d12$ID <- rownames(TPMs_d12)
+TPMs_d12 <- do.call(data.frame,lapply(TPMs_d12,function(x) replace(x, is.infinite(x),NA)))
+TPMs_d12[is.na(TPMs_d12)]<- -3 
+TPMs_hits_d12_LFC1 <- TPMs_d12[TPMs_d12$ID %in% hits_d12_LFC1$ID,]
+dim(TPMs_hits_d12_LFC1)
+
+col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_hits_d12_LFC1[,1:12], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_hits_d12_LFC1[,1:12]), cellwidth = 15,
+           fontsize_row = 0.001)
+
+# DESeq2::plotCounts(dds2HG_mRNA,"ENSG00000143167")
+
+```
+
+
+
+```{r custom heatmap}
+
+custom_list <- read.delim("~/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Custom_HM_gene_list.csv",sep = ";")
+colnames(custom_list)
+
+## preping the TPMs for custom HM ##
+TPM_2HG_ordered[2:13] <- log10(TPM_2HG_ordered[2:13])
+TPM_2HG_ordered <- do.call(data.frame,lapply(TPM_2HG_ordered,function(x) replace(x, is.infinite(x),NA)))
+
+TPM_2HG_ordered <- TPM_2HG_ordered[-grep("Naive",colnames(TPM_2HG_ordered))]
+
+## setting the colors ## 
+col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+
+
+## tem_vs_tcm_down ##
+tem_vs_tcm_down <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$tem_vs_tcm_down,]
+
+pheatmap(tem_vs_tcm_down[2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(tem_vs_tcm_down[,2:10]),fontsize_row = 6, 
+           labels_row = tem_vs_tcm_down$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(tem_vs_tcm_down[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(tem_vs_tcm_down[,2:10]),fontsize_row = 6, 
+           labels_row = tem_vs_tcm_down$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Tcell_act_topgenes ##
+Tcell_act_topgenes <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$Tcell_act_topgenes,]
+
+pheatmap(Tcell_act_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Tcell_act_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Tcell_act_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Tcell_act_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Tcell_act_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Tcell_act_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Leuko_act_adhesion ##
+Leuko_act_adhesion <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$Leuko_act_adhesion,]
+
+pheatmap(Leuko_act_adhesion[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Leuko_act_adhesion[,2:10]),fontsize_row = 6, 
+           labels_row = Leuko_act_adhesion$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Leuko_act_adhesion[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Leuko_act_adhesion[,2:10]),fontsize_row = 6, 
+           labels_row = Leuko_act_adhesion$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Stat5_upreg_topgenes ##
+Stat5_upreg_topgenes <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$Stat5_upreg_topgenes,]
+
+pheatmap(Stat5_upreg_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Stat5_upreg_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Stat5_upreg_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Stat5_upreg_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Stat5_upreg_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Stat5_upreg_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## prot_kinease_act_top ##
+prot_kinease_act_top <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$prot_kinease_act_top,]
+
+pheatmap(prot_kinease_act_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(prot_kinease_act_top[,2:10]),fontsize_row = 6, 
+           labels_row = prot_kinease_act_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(prot_kinease_act_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(prot_kinease_act_top[,2:10]),fontsize_row = 6, 
+           labels_row = prot_kinease_act_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## early_mem_fraietta #
+early_mem_fraietta <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$early_mem_fraietta,]
+
+pheatmap(early_mem_fraietta[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(early_mem_fraietta[,2:10]),fontsize_row = 6, 
+           labels_row = early_mem_fraietta$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(early_mem_fraietta[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(early_mem_fraietta[,2:10]),fontsize_row = 6, 
+           labels_row = early_mem_fraietta$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## HDAC_up_activ_Heller_top_not_all ##
+HDAC_up_activ_Heller_top_not_all <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$HDAC_up_activ_Heller_top_not_all,]
+
+pheatmap(HDAC_up_activ_Heller_top_not_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_not_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_not_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(HDAC_up_activ_Heller_top_not_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_not_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_not_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+## HDAC_up_activ_Heller_top_all ##
+HDAC_up_activ_Heller_top_all <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$HDAC_up_activ_Heller_top_all,]
+
+pheatmap(HDAC_up_activ_Heller_top_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(HDAC_up_activ_Heller_top_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Suz_12DN_top ##
+Suz_12DN_top <- TPM_2HG_ordered[TPM_2HG_ordered$external_gene_name %in% custom_list$Suz_12DN_top,]
+
+pheatmap(Suz_12DN_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Suz_12DN_top[,2:10]),fontsize_row = 6, 
+           labels_row = Suz_12DN_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Suz_12DN_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Suz_12DN_top[,2:10]),fontsize_row = 6, 
+           labels_row = Suz_12DN_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+```
+
+
+
+
+```{r custom heatmap hits only}
+
+custom_list <- read.delim("~/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Custom_HM_gene_list.csv",sep = ";")
+colnames(custom_list)
+
+TPMs_hits_d12 <- TPMs_d12[TPMs_d12$ID %in% hits_d12$ID,]
+
+## preping the TPMs for custom HM ##
+TPMs_hits_d12 <- merge(TPMs_hits_d12,tx_annotations,by.x="ID",by.y="ensembl_gene_id")
+TPMs_hits_d12 <- do.call(data.frame,lapply(TPMs_hits_d12,function(x) replace(x, is.infinite(x),NA)))
+
+## Removing naive populations  and re-ordering columns ##
+TPMs_hits_d12 <- TPMs_hits_d12[-grep("naive",colnames(TPMs_hits_d12))]
+
+TPMs_hits_d12_order <- data.frame("external_gene_name"=TPMs_hits_d12$external_gene_name,
+                            "d12_A_vehicle"=TPMs_hits_d12$d12_A_vehicle,
+                            "d12_B_vehicle"=TPMs_hits_d12$d12_B_vehicle,
+                            "d12_C_vehicle"=TPMs_hits_d12$d12_C_vehicle,
+                            "d12_A_S2HG"=TPMs_hits_d12$d12_A_S2HG,
+                            "d12_B_S2HG"=TPMs_hits_d12$d12_B_S2HG,
+                            "d12_C_S2HG"=TPMs_hits_d12$d12_C_S2HG,
+                            "d12_A_R2HG"=TPMs_hits_d12$d12_A_R2HG,
+                            "d12_B_R2HG"=TPMs_hits_d12$d12_B_R2HG,
+                            "d12_C_R2HG"=TPMs_hits_d12$d12_C_R2HG)
+
+
+
+## setting the colors ## 
+col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+
+
+## tem_vs_tcm_down ##
+tem_vs_tcm_down <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$tem_vs_tcm_down,]
+
+pheatmap(tem_vs_tcm_down[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(tem_vs_tcm_down[,2:10]),fontsize_row = 6, 
+           labels_row = tem_vs_tcm_down$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(tem_vs_tcm_down[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(tem_vs_tcm_down[,2:10]),fontsize_row = 6, 
+           labels_row = tem_vs_tcm_down$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Tcell_act_topgenes ##
+Tcell_act_topgenes <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$Tcell_act_topgenes,]
+
+pheatmap(Tcell_act_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Tcell_act_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Tcell_act_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Tcell_act_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Tcell_act_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Tcell_act_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Leuko_act_adhesion ##
+Leuko_act_adhesion <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$Leuko_act_adhesion,]
+
+pheatmap(Leuko_act_adhesion[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Leuko_act_adhesion[,2:10]),fontsize_row = 6, 
+           labels_row = Leuko_act_adhesion$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Leuko_act_adhesion[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Leuko_act_adhesion[,2:10]),fontsize_row = 6, 
+           labels_row = Leuko_act_adhesion$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Stat5_upreg_topgenes ##
+Stat5_upreg_topgenes <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$Stat5_upreg_topgenes,]
+
+pheatmap(Stat5_upreg_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Stat5_upreg_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Stat5_upreg_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Stat5_upreg_topgenes[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Stat5_upreg_topgenes[,2:10]),fontsize_row = 6, 
+           labels_row = Stat5_upreg_topgenes$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## prot_kinease_act_top ##
+prot_kinease_act_top <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$prot_kinease_act_top,]
+
+pheatmap(prot_kinease_act_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(prot_kinease_act_top[,2:10]),fontsize_row = 6, 
+           labels_row = prot_kinease_act_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(prot_kinease_act_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(prot_kinease_act_top[,2:10]),fontsize_row = 6, 
+           labels_row = prot_kinease_act_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## early_mem_fraietta #
+early_mem_fraietta <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$early_mem_fraietta,]
+
+pheatmap(early_mem_fraietta[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(early_mem_fraietta[,2:10]),fontsize_row = 6, 
+           labels_row = early_mem_fraietta$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(early_mem_fraietta[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(early_mem_fraietta[,2:10]),fontsize_row = 6, 
+           labels_row = early_mem_fraietta$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## HDAC_up_activ_Heller_top_not_all ##
+HDAC_up_activ_Heller_top_not_all <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$HDAC_up_activ_Heller_top_not_all,]
+
+pheatmap(HDAC_up_activ_Heller_top_not_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_not_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_not_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(HDAC_up_activ_Heller_top_not_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_not_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_not_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+## HDAC_up_activ_Heller_top_all ##
+HDAC_up_activ_Heller_top_all <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$HDAC_up_activ_Heller_top_all,]
+
+pheatmap(HDAC_up_activ_Heller_top_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(HDAC_up_activ_Heller_top_all[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(HDAC_up_activ_Heller_top_all[,2:10]),fontsize_row = 6, 
+           labels_row = HDAC_up_activ_Heller_top_all$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+## Suz_12DN_top ##
+Suz_12DN_top <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% custom_list$Suz_12DN_top,]
+
+pheatmap(Suz_12DN_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Suz_12DN_top[,2:10]),fontsize_row = 6, 
+           labels_row = Suz_12DN_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+pheatmap(Suz_12DN_top[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = F, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(Suz_12DN_top[,2:10]),fontsize_row = 6, 
+           labels_row = Suz_12DN_top$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+```
+
+
+
+
+```{r HM with gene classes}
+
+## ribosomal pt
+ribo_list <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/protein_class_Ribosomal.tsv")
+mamm_ribo_list <- ribo_list[-grep("Mito",ribo_list$Gene.description),]
+mamm_ribo_list <- data.frame("ID"=mamm_ribo_list$Gene)
+
+## RBPs
+castello <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/RBP_Castello_et_al_2016.csv", sep=";",header=T) 
+castello <- data.frame("ID"=castello$Symbol)
+eRIC <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/Perez-Perri2018_RBP_eRIC.csv", sep=";",header=T) 
+eRIC <- data.frame("ID"=eRIC$gene_name)
+tuschl <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/Tuschl_2014.csv", sep=";",header=T) 
+colnames(tuschl) <- "ID"
+
+RBP_list <- rbind(castello,eRIC,tuschl)
+RBP_list <- distinct(RBP_list, RBP_list$ID)
+colnames(RBP_list) <- "ID"
+
+RBP_list$ribo <- RBP_list$ID %in% ribo_list$Gene
+RBP_list <- subset(RBP_list,RBP_list$ribo==FALSE)
+RBP_list$ribo <- NULL
+dim(RBP_list) #1855 
+
+# ## CD ##
+CD_list <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/protein_class_CD.tsv", sep="")
+
+
+## Secreted
+secreted_list <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/protein_class_Predicted_secreted.tsv", sep="", header = T)
+secreted_list <- subset(secreted_list,secreted_list$Evidence>0)
+secreted_list <- data.frame("ID"=secreted_list$Gene)
+dim(secreted_list)
+
+## TFs
+TF_list <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/protein_class_Transcription.tsv")
+TF_list <- subset(TF_list,TF_list$Evidence>0)
+TF_list <- data.frame("ID"=TF_list$Gene)
+
+## TCA ##
+TCA_list <- read.delim("/home/ben/Analysis/RF_human/Gene_class_lists/protein_class_Citric.tsv")
+TCA_list <- data.frame("ID"=TCA_list$Gene)
+
+
+
+
+## ribosomal protein ##
+mamm_ribo <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% mamm_ribo_list$ID,]
+
+pheatmap(mamm_ribo[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(mamm_ribo[,2:10]),fontsize_row = 6, 
+           labels_row = mamm_ribo$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+
+## RBPs ##
+RBPs <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% RBP_list$ID,]
+
+pheatmap(RBPs[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(RBPs[,2:10]),fontsize_row = 6, 
+           labels_row = RBPs$external_gene_name, cellheight = 10, cellwidth=10)
+
+
+
+## CD ##
+CD <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% CD_list$Gene,]
+
+pheatmap(CD[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(CD[,2:10]),fontsize_row = 6, 
+           labels_row = CD$external_gene_name, cellheight = 6, cellwidth=10)
+
+
+
+## secreted ##
+secreted <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% secreted_list$ID,]
+
+pheatmap(secreted[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(secreted[,2:10]),fontsize_row = 6, 
+           labels_row = secreted$external_gene_name, cellheight = 6, cellwidth=10)
+
+
+
+
+## TFs ##
+TFs <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% TF_list$ID,]
+
+pheatmap(TFs[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "canberra", border_color = NA,
+           labels_col=colnames(TFs[,2:10]),fontsize_row = 6, 
+           labels_row = TFs$external_gene_name, cellheight = 6, cellwidth=10)
+
+
+DESeq2::plotCounts(dds2HG_mRNA,"ENSG00000115523")
+# 
+# ## TCA ## 
+
+
+# No Hits...
+
+
+# TCA <- TPMs_hits_d12_order[TPMs_hits_d12_order$external_gene_name %in% TCA_list$ID,]
+# 
+# pheatmap(TCA[,2:10], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+#            clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+#            clustering_distance_rows = "canberra", border_color = NA,
+#            labels_col=colnames(TCA[,2:10]),fontsize_row = 6, 
+#            labels_row = TCA$external_gene_name, cellheight = 6, cellwidth=10)
+
+
+
+
+
+```
+
+```{r proliferation marker in samples}
+
+colnames(TPM_2HG) == rownames(sample_table2HG)
+colnames(TPM_2HG)
+rownames(sample_table2HG)
+
+
+prolif <- sample_table2HG
+prolif$sample <- rownames(prolif)
+prolif$MKI67 <- as.vector(t(TPM_2HG[,1:21]["ENSG00000148773",]))
+prolif$E2F3 <- as.vector(t(TPM_2HG[,1:21]["ENSG00000112242",]))
+
+prolif <- prolif[grepl("d12",t(prolif$condition)),]
+
+ggplot(prolif, aes(y=log10(MKI67),x=condition,color=condition))+
+  geom_point()+
+  coord_flip()+
+  theme(aspect.ratio = 0.5)
+
+ggplot(prolif, aes(y=log10(E2F3),x=condition,color=condition))+
+  geom_point()+
+  coord_flip()+
+  theme(aspect.ratio = 0.5)
+
+ggplot(prolif, aes(y=log10(MKI67),x=log10(E2F3),color=condition))+
+  geom_point()+
+  theme(aspect.ratio = 1)
+
+
+
+```
+
+
+
+```{r }
+
+
+## importing the formated Fasta file and processing ##
+
+# Here we re-format the fasta format to table format ##
+# promoter_regions <- readtext::readtext("/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Promoter_region_1000bp_upstream_mart_export.txt")
+# glimpse(promoter_regions)
+# promoter_regions <- gsub("\\\n","",promoter_regions) # removing the newlines
+# promoter_regions <- gsub(">","\\\n>",promoter_regions) ## replace > by \n>
+# 
+# write(promoter_regions,"/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Promoter_region_1000bp_upstream_mart_export_reformatted.txt")
+
+promoter_regions <- read.delim("/home/ben/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/Promoter_region_1000bp_upstream_mart_export_reformatted.txt",sep="\t",header = F)
+
+# promoter_regions$gene.id <- mapply(strsplit(as.character(promoter_regions$V1),"\\>"),FUN=function(x){(as.character(x)[1])})
+# promoter_regions$gene.id <- gsub(">","",promoter_regions$gene.id)
+# promoter_regions$tx.id <- mapply(strsplit(as.character(promoter_regions$V1),"\\>"),FUN=function(x){(as.character(x)[1])})
+
+promoter_regions$sequence <- promoter_regions$V1
+colnames(promoter_regions)[1] <- "ID"
+promoter_regions$sequence <- gsub('^................','',promoter_regions$sequence)
+
+
+promoter_regions$ID <- gsub(">","",promoter_regions$ID)
+promoter_regions$ID <- gsub("A","",promoter_regions$ID)
+promoter_regions$ID <- gsub("T","",promoter_regions$ID)
+promoter_regions$ID <- gsub("G","",promoter_regions$ID)
+promoter_regions$ID <- gsub("C","",promoter_regions$ID)
+promoter_regions$ID <- gsub("ENS","ENSG",promoter_regions$ID)
+
+
+
+R2HG_vs_S2HG_d12_hits <- subset(R2HG_vs_S2HG_d12, R2HG_vs_S2HG_d12$group=="significant")
+
+S2HG_d12_hits <- subset(R2HG_vs_S2HG_d12_hits, R2HG_vs_S2HG_d12_hits$log2FoldChange>0.5)
+R2HG_d12_hits <- subset(R2HG_vs_S2HG_d12_hits, R2HG_vs_S2HG_d12_hits$log2FoldChange< -0.5)
+
+write.table(S2HG_d12_hits,"~/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/S2HG_d12_hits.csv",sep=";",row.names = F)
+write.table(R2HG_d12_hits,"~/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/R2HG_d12_hits.csv",sep=";",row.names = F)
+
+S2HG_d12_hits_promoter <- promoter_regions[promoter_regions$ID %in% S2HG_d12_hits$ID,]
+S2HG_d12_hits_promoter$ID <- paste0(">",S2HG_d12_hits_promoter$ID)
+write.table(S2HG_d12_hits_promoter,"~/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/S2HG_d12_hits_promoter.fasta",sep="\n",quote = F,col.names = F,row.names = F)
+
+R2HG_d12_hits_promoter <- promoter_regions[promoter_regions$ID %in% R2HG_d12_hits$ID,]
+R2HG_d12_hits_promoter$ID <- paste0(">",R2HG_d12_hits_promoter$ID)
+write.table(R2HG_d12_hits_promoter,"~/Analysis/collabs/Iosifina_RNAseq_R_S_2HG/R2HG_d12_hits_promoter.fasta",sep="\n",quote = F,col.names = F,row.names = F)
+
+```
+
+
+
+
+
+
+
+
+
+
+# Day 5 results
+
+## R2HG_vs_S2HG_d5
+```{r R2HG_vs_S2HG_d5}
+
+#contrast(AB)= "condition" "B" , "A"
+R2HG_vs_S2HG_d5 <- lfcShrink(dds2HG_mRNA, type="normal",contrast =  c("condition","S_2HG_d5","R_2HG_d5"), parallel = T)
+R2HG_vs_S2HG_d5 <- data.frame(R2HG_vs_S2HG_d5)
+R2HG_vs_S2HG_d5$group <- ""
+R2HG_vs_S2HG_d5$group[abs(R2HG_vs_S2HG_d5$log2FoldChange)>0.5 & R2HG_vs_S2HG_d5$padj<0.05] <- "significant"
+
+
+R2HG_vs_S2HG_d5$ID <- rownames(R2HG_vs_S2HG_d5)
+R2HG_vs_S2HG_d5 <- merge(R2HG_vs_S2HG_d5, tx_annotations, by.x="ID", by.y="ensembl_gene_id", all.x=T)
+
+
+ggplot(R2HG_vs_S2HG_d5, aes(x=log2FoldChange, y=-log10(padj)))+
+  geom_point(data=R2HG_vs_S2HG_d5[!R2HG_vs_S2HG_d5$group=="significant",],colour="grey", size=1,stroke=0)+
+  geom_point(data=R2HG_vs_S2HG_d5[R2HG_vs_S2HG_d5$group=="significant",],color="#2e86c1",size=2,stroke=0)+
+  geom_hline(yintercept = -log10(0.05), linetype="dashed")+ # -log(0.001)
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  scale_x_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_y_continuous(limits = c(0,15), expand = c(0,0))+
+  ggtitle("R2HG_vs_S2HG_d5")+
+  ggrepel::geom_text_repel(data=R2HG_vs_S2HG_d5[R2HG_vs_S2HG_d5$log2FoldChange> 0.5 & R2HG_vs_S2HG_d5$padj<0.01 ,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 1, nudge_x = 1.5, size=3)+
+  ggrepel::geom_text_repel(data=R2HG_vs_S2HG_d5[R2HG_vs_S2HG_d5$log2FoldChange< -0.5 & R2HG_vs_S2HG_d5$padj<0.01 ,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 1, nudge_x = -1.5, size=3)+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+
+
+dim(R2HG_vs_S2HG_d5[R2HG_vs_S2HG_d5$group=="significant",]) # 82 DE genes 
+
+#write.table(R2HG_vs_S2HG_d5, "/home/ben/Analysis/Iosifina_RNAseq_R_S_2HG/R2HG_vs_S2HG_d5_lfcshrink.csv", sep=";",dec = ",",row.names = F)
+
+```
+
+
+## Vehicle_d5_vs_S_2HG_d5
+```{r Vehicle_d5_vs_S_2HG_d5}
+
+#contrast(AB)= "condition" "B" , "A"
+Vehicle_d5_vs_S_2HG_d5 <- lfcShrink(dds2HG_mRNA, type="normal",contrast =  c("condition","S_2HG_d5","H2O_d5"), parallel = T)
+Vehicle_d5_vs_S_2HG_d5 <- data.frame(Vehicle_d5_vs_S_2HG_d5)
+Vehicle_d5_vs_S_2HG_d5$group <- ""
+Vehicle_d5_vs_S_2HG_d5$group[abs(Vehicle_d5_vs_S_2HG_d5$log2FoldChange)>0.5 & Vehicle_d5_vs_S_2HG_d5$padj<0.05] <- "significant"
+
+#Vehicle_d5_vs_S_2HG_d5 <- subset(Vehicle_d5_vs_S_2HG_d5,Vehicle_d5_vs_S_2HG_d5$baseMean>10)
+
+Vehicle_d5_vs_S_2HG_d5$ID <- rownames(Vehicle_d5_vs_S_2HG_d5)
+Vehicle_d5_vs_S_2HG_d5 <- merge(Vehicle_d5_vs_S_2HG_d5, tx_annotations, by.x="ID", by.y="ensembl_gene_id", all.x=T)
+
+
+ggplot(Vehicle_d5_vs_S_2HG_d5, aes(x=log2FoldChange, y=-log10(padj)))+
+  geom_point(data=Vehicle_d5_vs_S_2HG_d5[!Vehicle_d5_vs_S_2HG_d5$group=="significant",],colour="grey", size=1,stroke=0)+
+  geom_point(data=Vehicle_d5_vs_S_2HG_d5[Vehicle_d5_vs_S_2HG_d5$group=="significant",],color="#2e86c1",size=2,stroke=0)+
+  geom_hline(yintercept = -log10(0.05), linetype="dashed")+ # -log(0.001)
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  scale_x_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_y_continuous(limits = c(0,15), expand = c(0,0))+
+  ggtitle("Vehicle_d5_vs_S_2HG_d5")+
+  ggrepel::geom_text_repel(data=Vehicle_d5_vs_S_2HG_d5[Vehicle_d5_vs_S_2HG_d5$group=="significant" & Vehicle_d5_vs_S_2HG_d5$padj<0.05,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 1)+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+
+
+dim(Vehicle_d5_vs_S_2HG_d5[Vehicle_d5_vs_S_2HG_d5$group=="significant",]) # 45 DE genes 
+
+#write.table(Vehicle_d5_vs_S_2HG_d5, "/home/ben/Analysis/Iosifina_RNAseq_R_S_2HG/Vehicle_d5_vs_S_2HG_d5_lfcshrink.csv", sep=";",dec = ",",row.names = F)
+
+```
+
+
+## Vehicle_d5_vs_R_2HG_d5
+```{r Vehicle_d5_vs_R_2HG_d5}
+
+#contrast(AB)= "condition" "B" , "A"
+Vehicle_d5_vs_R_2HG_d5 <- lfcShrink(dds2HG_mRNA, type="normal",contrast =  c("condition","R_2HG_d5","H2O_d5"), parallel = T)
+Vehicle_d5_vs_R_2HG_d5 <- data.frame(Vehicle_d5_vs_R_2HG_d5)
+Vehicle_d5_vs_R_2HG_d5$group <- ""
+Vehicle_d5_vs_R_2HG_d5$group[abs(Vehicle_d5_vs_R_2HG_d5$log2FoldChange)>0.5 & Vehicle_d5_vs_R_2HG_d5$padj<0.05] <- "significant"
+
+#Vehicle_d5_vs_R_2HG_d5 <- subset(Vehicle_d5_vs_R_2HG_d5,Vehicle_d5_vs_R_2HG_d5$baseMean>10)
+
+Vehicle_d5_vs_R_2HG_d5$ID <- rownames(Vehicle_d5_vs_R_2HG_d5)
+Vehicle_d5_vs_R_2HG_d5 <- merge(Vehicle_d5_vs_R_2HG_d5, tx_annotations, by.x="ID", by.y="ensembl_gene_id", all.x=T)
+
+
+ggplot(Vehicle_d5_vs_R_2HG_d5, aes(x=log2FoldChange, y=-log10(padj)))+
+  geom_point(data=Vehicle_d5_vs_R_2HG_d5[!Vehicle_d5_vs_R_2HG_d5$group=="significant",],colour="grey", size=1,stroke=0)+
+  geom_point(data=Vehicle_d5_vs_R_2HG_d5[Vehicle_d5_vs_R_2HG_d5$group=="significant",],color="#2e86c1",size=2,stroke=0)+
+  geom_hline(yintercept = -log10(0.05), linetype="dashed")+ # -log(0.001)
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  scale_x_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_y_continuous(limits = c(0,25), expand = c(0,0))+
+  ggtitle("Vehicle_d5_vs_R_2HG_d5")+
+  ggrepel::geom_text_repel(data=Vehicle_d5_vs_R_2HG_d5[Vehicle_d5_vs_R_2HG_d5$log2FoldChange<= -2.5 & Vehicle_d5_vs_R_2HG_d5$padj<0.006,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 1)+
+  ggrepel::geom_text_repel(data=Vehicle_d5_vs_R_2HG_d5[Vehicle_d5_vs_R_2HG_d5$log2FoldChange>1 & Vehicle_d5_vs_R_2HG_d5$padj<0.01,], aes(label=external_gene_name), min.segment.length = 0.0001, force = 1, nudge_x = 2)+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+
+
+dim(Vehicle_d5_vs_R_2HG_d5[Vehicle_d5_vs_R_2HG_d5$group=="significant",]) # 45 DE genes 
+
+#write.table(Vehicle_d5_vs_R_2HG_d5, "/home/ben/Analysis/Iosifina_RNAseq_R_S_2HG/Vehicle_d5_vs_R_2HG_d5_lfcshrink.csv", sep=";",dec = ",",row.names = F)
+
+```
+## Comparing R- ans S-2HG effects at day 5
+```{r comparing R- ans S-2HG effects at day 5}
+
+Vehicle_d5_vs_R_2HG_d5_LFC <- Vehicle_d5_vs_R_2HG_d5
+Vehicle_d5_vs_S_2HG_d5_LFC <- Vehicle_d5_vs_S_2HG_d5
+colnames(Vehicle_d5_vs_R_2HG_d5_LFC)[2:10] <- paste0(colnames(Vehicle_d5_vs_R_2HG_d5_LFC)[2:10],"_R2HG")
+colnames(Vehicle_d5_vs_S_2HG_d5_LFC)[2:10] <- paste0(colnames(Vehicle_d5_vs_S_2HG_d5_LFC)[2:10],"_S2HG")
+
+LFC_LFC_d5_R_vs_S_2HG <- merge(Vehicle_d5_vs_R_2HG_d5_LFC,Vehicle_d5_vs_S_2HG_d5_LFC, by="ID")
+
+
+ggplot(LFC_LFC_d5_R_vs_S_2HG[(LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant"),],aes(y=log2FoldChange_R2HG,x=log2FoldChange_S2HG))+
+  geom_point(data=LFC_LFC_d5_R_vs_S_2HG[!(LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant"),], color="grey", stroke=0)+
+  geom_point(color="#839192")+
+  geom_point(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG>0.5 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG>0.5 & (LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant"),], color="red")+
+  geom_point(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG>0.5 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG<0.5 & (LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant"),], color="blue")+
+  geom_point(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG<0.5 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG> -0.5 & (LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant"),], color="#008000")+
+  geom_point(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG< -0.5 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG< -0.5 & (LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant"| LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant"),], color="purple")+
+  geom_hline(yintercept = c(-0.5,0.5), linetype="dashed")+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  scale_y_continuous(limits = c(-6,6), expand = c(0,0))+
+  scale_x_continuous(limits = c(-5,5), expand = c(0,0))+
+  theme_classic()+
+  theme(aspect.ratio = 1)+
+  ggtitle("LFC_LFC plot")+
+  ggrepel::geom_text_repel(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG>1 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG>1 & (LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d5_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = 2, nudge_y = 1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG>1.7 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG<0.5 & LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" & LFC_LFC_d5_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2, nudge_y = 1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG< 0.5 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG> 0.5 & (LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" | LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d5_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding"| LFC_LFC_d5_R_vs_S_2HG$external_gene_name_R2HG=="SELL",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = 2, nudge_y = -1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d5_R_vs_S_2HG[LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG< -3 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG< -3 & (LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant"| LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant") & LFC_LFC_d5_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding" | LFC_LFC_d5_R_vs_S_2HG$external_gene_name_R2HG=="ZNF683",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2, nudge_y = -1,size=3)+
+  ggrepel::geom_text_repel(data=LFC_LFC_d5_R_vs_S_2HG[abs(LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_R2HG)<0.5 & LFC_LFC_d5_R_vs_S_2HG$log2FoldChange_S2HG< -1.5 & !LFC_LFC_d5_R_vs_S_2HG$group_R2HG=="significant" & LFC_LFC_d5_R_vs_S_2HG$group_S2HG=="significant" & LFC_LFC_d5_R_vs_S_2HG$gene_biotype_R2HG=="protein_coding",], aes(label=external_gene_name_R2HG), min.segment.length = 0.0001, force = 1,nudge_x = -2,size=3)
+
+
+```
+
+
+## Heatmap of hits at day 5 LFC>0.5
+```{r heatmap of hits at day 5 LFC>0.5}
+
+dim(R2HG_vs_S2HG_d5[R2HG_vs_S2HG_d5$group =="significant" ,]) # 82
+dim(Vehicle_d5_vs_S_2HG_d5[Vehicle_d5_vs_S_2HG_d5$group =="significant" ,]) # 2
+dim(Vehicle_d5_vs_R_2HG_d5[Vehicle_d5_vs_R_2HG_d5$group =="significant" ,]) # 87
+
+
+hits_d5 <- rbind.data.frame(R2HG_vs_S2HG_d5[R2HG_vs_S2HG_d5$group =="significant" ,], Vehicle_d5_vs_S_2HG_d5[Vehicle_d5_vs_S_2HG_d5$group =="significant" ,],
+                             Vehicle_d5_vs_R_2HG_d5[Vehicle_d5_vs_R_2HG_d5$group =="significant" ,])
+
+hits_d5 <- distinct(hits_d5, ID,.keep_all=T)
+
+TPMs_d5 <- data.frame(tximp.salmon.2HG$abundance)
+TPMs_d5 <- dplyr::select(TPMs_d5,contains("d5"))
+TPMs_d5 <- log10(TPMs_d5)
+TPMs_d5$ID <- rownames(TPMs_d5)
+TPMs_d5 <- do.call(data.frame,lapply(TPMs_d5,function(x) replace(x, is.infinite(x),NA)))
+TPMs_d5[is.na(TPMs_d5)]<- -3 
+TPMs_hits_d5 <- TPMs_d5[TPMs_d5$ID %in% hits_d5$ID,]
+dim(TPMs_hits_d5)
+
+col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_hits_d5[,1:9], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_hits_d5[,1:9]), cellwidth = 15,
+           fontsize_row = 0.001)
+
+
+## Hits at both d12 OR d5 ##
+TPMs_d5_OR_d12_hits <- data.frame(tximp.salmon.2HG$abundance)
+TPMs_d5_OR_d12_hits <- dplyr::select(TPMs_d5_OR_d12_hits,-contains("naive"))
+TPMs_d5_OR_d12_hits <- log10(TPMs_d5_OR_d12_hits)
+TPMs_d5_OR_d12_hits$ID <- rownames(TPMs_d5_OR_d12_hits)
+TPMs_d5_OR_d12_hits <- do.call(data.frame,lapply(TPMs_d5_OR_d12_hits,function(x) replace(x, is.infinite(x),NA)))
+TPMs_d5_OR_d12_hits[is.na(TPMs_d5_OR_d12_hits)]<- -3 
+TPMs_d5_OR_d12_hits <- TPMs_d5_OR_d12_hits[(TPMs_d5_OR_d12_hits$ID %in% hits_d5$ID) | (TPMs_d5_OR_d12_hits$ID %in% hits_d12$ID),]
+dim(TPMs_d5_OR_d12_hits)
+
+#col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_d5_OR_d12_hits[,1:18], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_d5_OR_d12_hits[,1:18]), cellwidth = 15,
+           fontsize_row = 0.001, cutree_cols = 2)
+
+
+
+
+## hits both at day 5 AND day12 ##
+
+TPMs_hits_d5_and_d12 <- data.frame(tximp.salmon.2HG$abundance)
+TPMs_hits_d5_and_d12 <- dplyr::select(TPMs_hits_d5_and_d12,-contains("naive"))
+TPMs_hits_d5_and_d12 <- log10(TPMs_hits_d5_and_d12)
+TPMs_hits_d5_and_d12$ID <- rownames(TPMs_hits_d5_and_d12)
+TPMs_hits_d5_and_d12 <- do.call(data.frame,lapply(TPMs_hits_d5_and_d12,function(x) replace(x, is.infinite(x),NA)))
+TPMs_hits_d5_and_d12[is.na(TPMs_hits_d5_and_d12)]<- -3 
+TPMs_hits_hits_d5_and_d12 <- TPMs_hits_d5_and_d12[(TPMs_hits_d5_and_d12$ID %in% hits_d5$ID) & (TPMs_hits_d5_and_d12$ID %in% hits_d12$ID),]
+dim(TPMs_hits_hits_d5_and_d12)
+
+TPMs_hits_hits_d5_and_d12 <- merge(TPMs_hits_hits_d5_and_d12,tx_annotations,by.x="ID", by.y="ensembl_gene_id",all.x=T)
+
+#col_fun = colorRamp2(c(-3, -1.5, 0, 1.5, 3), c("#053061","#579EC9","#FFFFFF","#D96651","#67001F"))
+#heatmap
+
+pheatmap(TPMs_hits_hits_d5_and_d12[,2:19], col_fun(seq(-5,5,by=0.01)) ,scale = "row",
+           clustering_distance_cols = "canberra", cluster_cols = T, cluster_rows = T,
+           clustering_distance_rows = "manhattan", border_color = NA,
+           labels_col=colnames(TPMs_hits_hits_d5_and_d12[,2:19]), cellwidth = 15,
+           fontsize_row = 5, cutree_cols = 1, labels_row =TPMs_hits_hits_d5_and_d12$external_gene_name)
+
+
+```
+
+
+
+
+## Comparing R- and S-2HG effects d12 vs d5
+```{r comparing R- and S-2HG effects d12 vs d5 }
+R2HG_vs_S2HG_d5_LFC <- R2HG_vs_S2HG_d5
+R2HG_vs_S2HG_d12_LFC <- R2HG_vs_S2HG_d12
+colnames(R2HG_vs_S2HG_d5_LFC)[2:10] <- paste0(colnames(R2HG_vs_S2HG_d5_LFC)[2:10],"_d5")
+colnames(R2HG_vs_S2HG_d12_LFC)[2:10] <- paste0(colnames(R2HG_vs_S2HG_d12_LFC)[2:10],"_d12")
+
+LFC_LFC_R_vs_S_2HG_d5_d12 <- merge(R2HG_vs_S2HG_d5_LFC,R2HG_vs_S2HG_d12_LFC, by="ID")
+
+
+ggplot(LFC_LFC_R_vs_S_2HG_d5_d12[(LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant" | LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant"),],aes(y=log2FoldChange_d5,x=log2FoldChange_d12))+
+  geom_point(data=LFC_LFC_R_vs_S_2HG_d5_d12[!(LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant" | LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant"),], color="grey", stroke=0)+
+  geom_point(color="#839192")+
+  geom_point(data=LFC_LFC_R_vs_S_2HG_d5_d12[LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5> -0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12> 0.5 & (LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant" | LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant"),], color="red")+
+  geom_point(data=LFC_LFC_R_vs_S_2HG_d5_d12[LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5>0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12< -0.5 & (LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant"),], color="blue")+
+  geom_point(data=LFC_LFC_R_vs_S_2HG_d5_d12[LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5< -0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12> 0.5 & (LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant" | LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant"),], color="#008000")+
+  geom_point(data=LFC_LFC_R_vs_S_2HG_d5_d12[LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5< 0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12< -0.5 & (LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant"| LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant"),], color="purple")+
+  geom_hline(yintercept = c(-0.5,0.5), linetype="dashed")+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  geom_vline(xintercept = c(-0.5,0.5), linetype="dashed")+
+  scale_y_continuous(limits = c(-4,4), expand = c(0,0))+
+  scale_x_continuous(limits = c(-6,6), expand = c(0,0))+
+  theme_classic()+
+  theme(aspect.ratio = 1)+
+  ggtitle("LFC_LFC plot")+
+  xlab("R2HG_vs_S2HG_d12")+
+  ylab("R2HG_vs_S2HG_d5")+
+  ggrepel::geom_text_repel(data=LFC_LFC_R_vs_S_2HG_d5_d12[((LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5> -0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12>3) | (LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5>1.75 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12>0.5)) & (LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant" | LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant") & LFC_LFC_R_vs_S_2HG_d5_d12$gene_biotype_d5=="protein_coding",], aes(label=external_gene_name_d5), min.segment.length = 0.0001, force = 1,nudge_x = 1, nudge_y = 0.5,size=3)+ # RED
+  
+  ggrepel::geom_text_repel(data=LFC_LFC_R_vs_S_2HG_d5_d12[LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5>1.7 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12< -0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant" & LFC_LFC_R_vs_S_2HG_d5_d12$gene_biotype_d5=="protein_coding",], aes(label=external_gene_name_d5), min.segment.length = 0.0001, force = 1,nudge_x = -2, nudge_y = 1,size=3)+ # blue
+  
+  ggrepel::geom_text_repel(data=LFC_LFC_R_vs_S_2HG_d5_d12[LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5< -0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12> 0.5 & (LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant" | LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant") & LFC_LFC_R_vs_S_2HG_d5_d12$gene_biotype_d5=="protein_coding"| LFC_LFC_R_vs_S_2HG_d5_d12$external_gene_name_d5=="SELL",], aes(label=external_gene_name_d5), min.segment.length = 0.0001, force = 1,nudge_x = 2, nudge_y = -1,size=3)+ # Green
+  
+  ggrepel::geom_text_repel(data=LFC_LFC_R_vs_S_2HG_d5_d12[((LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5< 0.5 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12< -2) |(LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d5< -2 & LFC_LFC_R_vs_S_2HG_d5_d12$log2FoldChange_d12< -0.5)) & (LFC_LFC_R_vs_S_2HG_d5_d12$group_d5=="significant"| LFC_LFC_R_vs_S_2HG_d5_d12$group_d12=="significant") & LFC_LFC_R_vs_S_2HG_d5_d12$gene_biotype_d5=="protein_coding" ,], aes(label=external_gene_name_d5), min.segment.length = 0.0001, force = 1,nudge_x = -1, nudge_y = -0.5 ,size=3) # purple
+
+```
+
+
+
+
