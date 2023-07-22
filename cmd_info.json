@@ -1,0 +1,12 @@
+{
+    "salmon_version": "1.4.0",
+    "index": "/home/ben/Analysis/genome_refs/gencode_v37/Salmon_index_v37_k31/",
+    "libType": "A",
+    "mates1": "d5_60_H20_r1.fastq",
+    "mates2": "d5_60_H20_r2.fastq",
+    "validateMappings": [],
+    "gcBias": [],
+    "threads": "20",
+    "output": "/mnt/sda/Iosifina_RNAseq_R_S_2HG_d5_d2/Salmon_output/d5_60_H20",
+    "auxDir": "aux_info"
+}
